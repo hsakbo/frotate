@@ -12,7 +12,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileModifiedEvent, DirModifiedEvent
 
 sys.path.append(os.path.abspath(__file__))
+from idgen import idgen
 from rotator import FileRotate
+
 
 @dataclass
 class Args:
@@ -77,24 +79,29 @@ def update_checksums(source: str, checksums: dict) -> None:
             checksums[file] = zlib.crc32(f.read())
 
 
-def generate_staging_archive(args: Args) -> None:
+def generate_staging_archive(args: Args, id_generator: idgen) -> str:
     start_time = time.time()
-    path = os.path.join(args.dest, "staging.7z")
+    id = id_generator.generate()
+    name = f"staging-{id}.7z"
+    path = os.path.join(args.dest, name)
     with py7zr.SevenZipFile(path, 'w') as archive:
         archive.writeall(args.source)
     elapse = round(time.time() - start_time, 3)
     logging.info(f"Staging archive generated: took {elapse}s. Beginning rotation, DO NOT QUIT!")
+    return name
 
 
 def handler_factory(args: Args):
     checksums = {}
     lock = False  # TODO: make a more sophisticated lock than this
     rotator = FileRotate(args.dest, args.count, "7z", eprint)
+    id_generator = idgen(10)
     update_checksums(args.source, checksums=checksums)
     def handler(event: FileModifiedEvent):
         nonlocal lock
         nonlocal checksums
         nonlocal rotator
+        nonlocal id_generator
         if lock or type(event) == DirModifiedEvent:
             return
         new_checksums = {}
@@ -106,9 +113,9 @@ def handler_factory(args: Args):
         time.sleep(args.delay)
         checksums = new_checksums
         logging.info(f"Modification detected on '{event.src_path}', backing up directory...")
-        generate_staging_archive(args)
+        name = generate_staging_archive(args, id_generator)
 
-        status = rotator.add_file("staging.7z")
+        status = rotator.add_file(name)
         if status:
             logging.info(f"Successfully rotated. Continuing to watch.")
         else:
