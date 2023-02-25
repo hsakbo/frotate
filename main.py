@@ -60,6 +60,7 @@ def parse_args() -> Args:
     args_dict = vars(arg_data)
     return Args(**args_dict)
 
+
 def validate(args):
     if (not os.path.isdir(args.dest)):
         eprint(f"Error: destination directory '{args.dest}' does not exist")
@@ -70,13 +71,39 @@ def validate(args):
         sys.exit(2)
 
 
-def update_checksums(source: str, checksums: dict) -> None:
-    files = [
-        os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(source)) for f in fn
-    ]
-    for file in files:
-        with open(file, "rb") as f:
-            checksums[file] = zlib.crc32(f.read())
+def clean_staging(path: str) -> None:
+    files = os.listdir(path)
+    staging_file = [ file for file in files if file[:7] == "staging" ]
+    for file in staging_file:
+        filename = os.path.basename(file)
+        logging.warning(f"Orphaned staging file '{filename}' detected. Cleaning..")
+        os.remove(file)
+
+
+def update_checksums(source: str, 
+                     checksums: dict, 
+                     sleep_time: int = 1) -> None:
+    max_tries = 5
+    tries = max_tries
+    while tries:
+        try:
+            files = [
+                os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(source)) for f in fn
+            ]
+            for file in files:
+                with open(file, "rb") as f:  # file might still be locked for read
+                    checksums[file] = zlib.crc32(f.read())
+            return
+        except PermissionError as e:
+            logging.exception(e)
+            logging.warn(f"Retrying after {sleep_time}s")
+            time.sleep(sleep_time)
+            tries -= 1
+            
+    
+    ## this section is only reached when number of tries exceeds max_tries
+    logging.error(f"Fatal Error could not read files for {max_tries}. Exiting")
+    sys.exit(3)
 
 
 def generate_staging_archive(args: Args, id_generator: idgen) -> str:
@@ -119,7 +146,7 @@ def handler_factory(args: Args):
         if status:
             logging.info(f"Successfully rotated. Continuing to watch.")
         else:
-            logging.warn(f"noop, possible hash collision (duplicate). Continuing to watch.")
+            logging.warning(f"noop, possible hash collision (duplicate). Continuing to watch.")
 
         checksums = new_checksums
         lock = False
@@ -130,6 +157,7 @@ def main():
     args = parse_args()
     validate(args)
     init_logs()
+    clean_staging(args.dest)
     observer = Observer()
     event_handler = FileSystemEventHandler()
     event_handler.on_modified = handler_factory(args)
@@ -142,6 +170,7 @@ def main():
     finally:
         observer.stop()
         observer.join(1)
+        clean_staging(args.dest)
         logging.info("exiting")
 
 
