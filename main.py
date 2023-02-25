@@ -75,9 +75,8 @@ def clean_staging(path: str) -> None:
     files = os.listdir(path)
     staging_file = [ file for file in files if file[:7] == "staging" ]
     for file in staging_file:
-        filename = os.path.basename(file)
-        logging.warning(f"Orphaned staging file '{filename}' detected. Cleaning..")
-        os.remove(file)
+        logging.warning(f"Orphaned staging file '{file}' detected. Cleaning..")
+        os.remove(os.path.join(path, file))
 
 
 def update_checksums(source: str, 
