@@ -146,5 +146,4 @@ def main():
 
 
 if __name__ == '__main__':
-    init_logs()
     main()
