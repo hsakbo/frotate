@@ -95,7 +95,7 @@ def update_checksums(source: str,
             return
         except PermissionError as e:
             logging.exception(e)
-            logging.warn(f"Retrying after {sleep_time}s")
+            logging.warning(f"Retrying after {sleep_time}s")
             time.sleep(sleep_time)
             tries -= 1
             
@@ -133,6 +133,7 @@ def handler_factory(args: Args):
         new_checksums = {}
         update_checksums(args.source, checksums=new_checksums)
         if new_checksums == checksums:
+            logging.warning(f"noop, possible hash collision (duplicate). Continuing to watch.")
             return
 
         lock = True
