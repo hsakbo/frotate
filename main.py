@@ -12,7 +12,9 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler, FileModifiedEvent, DirModifiedEvent
 
 sys.path.append(os.path.abspath(__file__))
+from idgen import idgen
 from rotator import FileRotate
+
 
 @dataclass
 class Args:
@@ -58,6 +60,7 @@ def parse_args() -> Args:
     args_dict = vars(arg_data)
     return Args(**args_dict)
 
+
 def validate(args):
     if (not os.path.isdir(args.dest)):
         eprint(f"Error: destination directory '{args.dest}' does not exist")
@@ -68,51 +71,82 @@ def validate(args):
         sys.exit(2)
 
 
-def update_checksums(source: str, checksums: dict) -> None:
-    files = [
-        os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(source)) for f in fn
-    ]
-    for file in files:
-        with open(file, "rb") as f:
-            checksums[file] = zlib.crc32(f.read())
+def clean_staging(path: str) -> None:
+    files = os.listdir(path)
+    staging_file = [ file for file in files if file[:7] == "staging" ]
+    for file in staging_file:
+        logging.warning(f"Orphaned staging file '{file}' detected. Cleaning..")
+        os.remove(os.path.join(path, file))
 
 
-def generate_staging_archive(args: Args) -> None:
+def update_checksums(source: str, 
+                     checksums: dict, 
+                     sleep_time: int = 1) -> None:
+    max_tries = 5
+    tries = max_tries
+    while tries:
+        try:
+            files = [
+                os.path.join(dp, f) for dp, dn, fn in os.walk(os.path.expanduser(source)) for f in fn
+            ]
+            for file in files:
+                with open(file, "rb") as f:  # file might still be locked for read
+                    checksums[file] = zlib.crc32(f.read())
+            return
+        except PermissionError as e:
+            logging.exception(e)
+            logging.warning(f"Retrying after {sleep_time}s")
+            time.sleep(sleep_time)
+            tries -= 1
+            
+    
+    ## this section is only reached when number of tries exceeds max_tries
+    logging.error(f"Fatal Error could not read files for {max_tries}. Exiting")
+    sys.exit(3)
+
+
+def generate_staging_archive(args: Args, id_generator: idgen) -> str:
     start_time = time.time()
-    path = os.path.join(args.dest, "staging.7z")
+    id = id_generator.generate()
+    name = f"staging-{id}.7z"
+    path = os.path.join(args.dest, name)
     with py7zr.SevenZipFile(path, 'w') as archive:
         archive.writeall(args.source)
     elapse = round(time.time() - start_time, 3)
     logging.info(f"Staging archive generated: took {elapse}s. Beginning rotation, DO NOT QUIT!")
+    return name
 
 
 def handler_factory(args: Args):
     checksums = {}
     lock = False  # TODO: make a more sophisticated lock than this
     rotator = FileRotate(args.dest, args.count, "7z", eprint)
+    id_generator = idgen(10)
     update_checksums(args.source, checksums=checksums)
     def handler(event: FileModifiedEvent):
         nonlocal lock
         nonlocal checksums
         nonlocal rotator
+        nonlocal id_generator
         if lock or type(event) == DirModifiedEvent:
             return
         new_checksums = {}
         update_checksums(args.source, checksums=new_checksums)
         if new_checksums == checksums:
+            logging.warning(f"noop, possible hash collision (duplicate). Continuing to watch.")
             return
 
         lock = True
         time.sleep(args.delay)
         checksums = new_checksums
         logging.info(f"Modification detected on '{event.src_path}', backing up directory...")
-        generate_staging_archive(args)
+        name = generate_staging_archive(args, id_generator)
 
-        status = rotator.add_file("staging.7z")
+        status = rotator.add_file(name)
         if status:
             logging.info(f"Successfully rotated. Continuing to watch.")
         else:
-            logging.warn(f"noop, possible hash collision (duplicate). Continuing to watch.")
+            logging.warning(f"noop, possible hash collision (duplicate). Continuing to watch.")
 
         checksums = new_checksums
         lock = False
@@ -123,6 +157,7 @@ def main():
     args = parse_args()
     validate(args)
     init_logs()
+    clean_staging(args.dest)
     observer = Observer()
     event_handler = FileSystemEventHandler()
     event_handler.on_modified = handler_factory(args)
@@ -135,9 +170,9 @@ def main():
     finally:
         observer.stop()
         observer.join(1)
+        clean_staging(args.dest)
         logging.info("exiting")
 
 
 if __name__ == '__main__':
-    init_logs()
     main()
